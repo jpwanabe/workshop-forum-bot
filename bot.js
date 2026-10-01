@@ -907,6 +907,8 @@ async function checkForNewItems() {
     );
 
     log(`Found ${newItems.length} new Workshop item(s).`);
+    let posted = 0;
+    let failed = 0;
 
     for (let i = 0; i < newItems.length; i++) {
       const item = newItems[i];
@@ -927,8 +929,9 @@ async function checkForNewItems() {
         // Save after every successful post so a later failure cannot
         // cause already-posted items to be duplicated after restart.
         await saveState(state);
-
+        posted++;
         log(`Posted "${item.title}" successfully.`);
+
 		if (i < newItems.length - 1) {
           log(
             `Waiting ${config.posting.delaySeconds} second(s) before next post.`
@@ -937,6 +940,7 @@ async function checkForNewItems() {
           await sleep(config.posting.delaySeconds * 1000);
         }
       } catch (error) {
+        failed++;
         log(
           `Failed to post Workshop item ${item.publishedfileid}: ${error.stack ?? error}`
         );
@@ -944,7 +948,8 @@ async function checkForNewItems() {
     }
 	
     log(
-      `Workshop catch-up complete. ${newItems.length} new item(s) processed.`
+      `Workshop catch-up complete. ${newItems.length} new item(s) found; ` +
+      `${posted} posted; ${failed} failed.`
     );
   } finally {
     if (lockAcquired) {
