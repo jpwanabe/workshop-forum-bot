@@ -27,6 +27,11 @@ const FORUM_CHANNEL_ID = process.env.DISCORD_FORUM_CHANNEL_ID;
 let config;
 let forumChannel;
 
+let shuttingDown = false;
+let workshopTimer = null;
+let subscriberTimer = null;
+let activeClient = null;
+
 let newItemCheckRunning = false;
 let subscriberUpdateRunning = false;
 
@@ -46,6 +51,47 @@ function logError(prefix, error) {
 
   console.error(`${prefix}:`, error);
 }
+
+async function shutdown(signal) {
+  if (shuttingDown) {
+    return;
+  }
+
+  shuttingDown = true;
+
+  log(`Received ${signal}. Shutting down...`);
+
+  if (workshopTimer) {
+    clearTimeout(workshopTimer);
+    workshopTimer = null;
+  }
+
+  if (subscriberTimer) {
+    clearTimeout(subscriberTimer);
+    subscriberTimer = null;
+  }
+
+  try {
+    if (activeClient) {
+      activeClient.destroy();
+      activeClient = null;
+    }
+  } catch (error) {
+    logError("Error while disconnecting from Discord", error);
+  }
+
+  log("Shutdown complete.");
+  process.exit(0);
+}
+
+
+process.once("SIGINT", () => {
+  shutdown("SIGINT");
+});
+
+process.once("SIGTERM", () => {
+  shutdown("SIGTERM");
+});
 
 function validateEnvironment() {
   const missing = [];
@@ -972,14 +1018,21 @@ async function updateSubscriberCounts() {
   }
 }
 
-function scheduleLoop(name, intervalMs, task) {
+function scheduleLoop(name, intervalMs, task, setTimer) {
   async function run() {
+    if (shuttingDown) {
+      return;
+    }
+
     try {
       await task();
     } catch (error) {
       log(`${name} failed: ${error.stack ?? error}`);
     } finally {
-      setTimeout(run, intervalMs);
+      if (!shuttingDown) {
+        const timer = setTimeout(run, intervalMs);
+        setTimer(timer);
+      }
     }
   }
 
@@ -994,6 +1047,7 @@ async function runSubscriberUpdateTest() {
   const client = new Client({
     intents: [GatewayIntentBits.Guilds]
   });
+  activeClient = client;
 
   client.once("clientReady", async () => {
     try {
@@ -1018,10 +1072,12 @@ async function runSubscriberUpdateTest() {
       log("Subscriber update test complete.");
 
       client.destroy();
+      activeClient = null;
       process.exit(0);
     } catch (error) {
       logError("Subscriber update test failed", error);
       client.destroy();
+      activeClient = null;
       process.exit(1);
     }
   });
@@ -1062,6 +1118,8 @@ async function main() {
     intents: [GatewayIntentBits.Guilds]
   });
 
+  activeClient = client;
+
   client.once("clientReady", async () => {
     try {
       log(`Logged in to Discord as ${client.user.tag}`);
@@ -1091,16 +1149,28 @@ async function main() {
       scheduleLoop(
         "Workshop check",
         newItemInterval,
-        checkForNewItems
+        checkForNewItems,
+        timer => {
+          workshopTimer = timer;
+        }
       );
 
       // Don't run subscriber updates immediately because a fresh
       // installation has nothing bot-posted to update.
-      setTimeout(() => {
+      subscriberTimer = setTimeout(() => {
+        subscriberTimer = null;
+
+        if (shuttingDown) {
+          return;
+        }
+
         scheduleLoop(
           "Subscriber update",
           subscriberInterval,
-          updateSubscriberCounts
+          updateSubscriberCounts,
+          timer => {
+            subscriberTimer = timer;
+          }
         );
       }, subscriberInterval);
 
