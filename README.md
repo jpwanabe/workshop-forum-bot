@@ -41,7 +41,7 @@ The bot periodically refreshes subscriber counts on existing posts.
 Clone the repository and install dependencies:
 
 ```bash
-git clone YOUR_REPOSITORY_URL
+git clone https://github.com/jpwanabe/workshop-forum-bot.git
 cd workshop-forum-bot
 npm install
 ```
