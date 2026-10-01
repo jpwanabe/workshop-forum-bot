@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily restart for Steam Workshop Discord Forum Bot
+
+[Timer]
+OnCalendar=*-*-* 04:00:00
+Persistent=true
+Unit=workshop-forum-bot-restart.service
+
+[Install]
+WantedBy=timers.target

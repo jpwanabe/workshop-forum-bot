@@ -1,14 +1,21 @@
 {
-  "name": "workshop_forum_bot",
+  "name": "workshop-forum-bot",
   "version": "1.0.0",
-  "main": "index.js",
+  "description": "Automatically post Steam Workshop items to a Discord Forum channel and keep subscriber counts updated.",
+  "main": "bot.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node bot.js",
+    "update-subscribers": "node bot.js --update-subscribers"
   },
-  "keywords": [],
+  "keywords": [
+    "steam",
+    "workshop",
+    "discord",
+    "discord-bot",
+    "steam-workshop"
+  ],
   "author": "",
-  "license": "ISC",
-  "description": "",
+  "license": "MIT",
   "dependencies": {
     "discord.js": "^14.27.0",
     "dotenv": "^18.0.5"

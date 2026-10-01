@@ -1,0 +1,17 @@
+[Unit]
+Description=Steam Workshop Discord Forum Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jp
+Group=jp
+WorkingDirectory=/tank/bots/workshop_forum_bot
+ExecStart=/usr/bin/node /tank/bots/workshop_forum_bot/bot.js
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

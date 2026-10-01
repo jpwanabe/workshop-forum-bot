@@ -1,0 +1,6 @@
+[Unit]
+Description=Restart Steam Workshop Discord Forum Bot
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl restart workshop-forum-bot.service
