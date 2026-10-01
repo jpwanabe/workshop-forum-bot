@@ -34,6 +34,68 @@ let activeClient = null;
 
 let newItemCheckRunning = false;
 let subscriberUpdateRunning = false;
+let subscriberUpdateWaiting = false;
+
+let stateWorkOwner = null;
+const stateWorkWaiters = [];
+
+async function acquireStateWork(owner) {
+  if (owner === "subscriber") {
+    subscriberUpdateWaiting = true;
+  }
+
+  if (stateWorkOwner === null) {
+    stateWorkOwner = owner;
+
+    if (owner === "subscriber") {
+      subscriberUpdateWaiting = false;
+    }
+
+    return;
+  }
+
+  await new Promise(resolve => {
+    stateWorkWaiters.push({
+      owner,
+      resolve
+    });
+  });
+
+  if (owner === "subscriber") {
+    subscriberUpdateWaiting = false;
+  }
+}
+
+function releaseStateWork(owner) {
+  if (stateWorkOwner !== owner) {
+    throw new Error(
+      `State work lock release mismatch: ${owner} tried to release ` +
+      `${stateWorkOwner ?? "an unlocked lock"}.`
+    );
+  }
+
+  if (!stateWorkWaiters.length) {
+    stateWorkOwner = null;
+    return;
+  }
+
+  let nextIndex = 0;
+
+  if (subscriberUpdateWaiting) {
+    const subscriberIndex = stateWorkWaiters.findIndex(
+      waiter => waiter.owner === "subscriber"
+    );
+
+    if (subscriberIndex !== -1) {
+      nextIndex = subscriberIndex;
+    }
+  }
+
+  const [next] = stateWorkWaiters.splice(nextIndex, 1);
+
+  stateWorkOwner = next.owner;
+  next.resolve();
+}
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -809,8 +871,15 @@ async function checkForNewItems() {
   }
 
   newItemCheckRunning = true;
+  let lockAcquired = false;
 
   try {
+    if (subscriberUpdateWaiting || stateWorkOwner === "subscriber") {
+      log("New-item check waiting for subscriber update to finish.");
+    }
+
+    await acquireStateWork("workshop");
+    lockAcquired = true;
     let state = await loadState();
     const items = await getAllWorkshopItems();
 
@@ -878,6 +947,10 @@ async function checkForNewItems() {
       `Workshop catch-up complete. ${newItems.length} new item(s) processed.`
     );
   } finally {
+    if (lockAcquired) {
+      releaseStateWork("workshop");
+    }
+
     newItemCheckRunning = false;
   }
 }
@@ -891,8 +964,16 @@ async function updateSubscriberCounts() {
   }
 
   subscriberUpdateRunning = true;
+  subscriberUpdateWaiting = true;
+  let lockAcquired = false;
 
   try {
+    if (stateWorkOwner !== null) {
+      log("Subscriber update waiting for current Workshop work to finish.");
+    }
+
+    await acquireStateWork("subscriber");
+    lockAcquired = true;
     const state = await loadState();
 
     if (!state) {
@@ -1014,6 +1095,12 @@ async function updateSubscriberCounts() {
       `${changedItems.length} changed; ${updated} updated; ${failed} failed.`
     );
   } finally {
+    subscriberUpdateWaiting = false;
+
+    if (lockAcquired) {
+      releaseStateWork("subscriber");
+    }
+
     subscriberUpdateRunning = false;
   }
 }
@@ -1143,7 +1230,7 @@ async function main() {
       const newItemInterval =
         config.monitor.newItemCheckMinutes * 60 * 1000;
 
-      const subscriberInterval =
+        const subscriberInterval =
         config.monitor.subscriberUpdateHours * 60 * 60 * 1000;
 
       scheduleLoop(
