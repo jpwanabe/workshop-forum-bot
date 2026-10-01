@@ -1,0 +1,51 @@
+{
+  "_comment": "Workshop Forum Bot configuration. Copy this file to config.json before starting the bot.",
+
+  "steam": {
+    "_comment_appId": "Steam AppID of the game whose Workshop should be monitored. Example: DrainSim is 2963800.",
+    "appId": 2963800,
+
+    "filter": {
+      "_comment_mode": "Workshop filter mode. Use 'all' for every Workshop item or 'include' to require specific Workshop tags.",
+      "mode": "all",
+
+      "_comment_tags": "Tags to include when mode is 'include'. Tags are game-specific and must match the tags used by that game's Steam Workshop. Leave empty when mode is 'all'.",
+      "tags": [],
+
+      "_comment_matchAll": "When multiple include tags are configured: true requires all configured tags; false allows an item matching any configured tag.",
+      "matchAll": true,
+
+      "_comment_excludeTags": "Workshop tags that should never be posted. Leave empty to exclude nothing.",
+      "excludeTags": []
+    }
+  },
+
+  "discord": {
+    "_comment_descriptionLimit": "Maximum number of characters from the Workshop description shown in Discord. Valid range: 1-4096.",
+    "descriptionLimit": 500
+  },
+
+  "monitor": {
+    "_comment_newItemCheckMinutes": "How often Steam is checked for new Workshop items. Minimum: 1 minute.",
+    "newItemCheckMinutes": 5,
+
+    "_comment_subscriberUpdateHours": "How often subscriber counts on existing Discord posts are refreshed. Minimum: 1 hour.",
+    "subscriberUpdateHours": 6
+  },
+
+  "posting": {
+    "_comment_delaySeconds": "Delay between creating multiple Discord Forum posts. Applies to initial imports and catch-up after downtime. Minimum: 1 second.",
+    "delaySeconds": 10,
+
+    "_comment_subscriberUpdateDelayMs": "Delay in milliseconds between edits when refreshing subscriber counts. Use 0 for no additional delay.",
+    "subscriberUpdateDelayMs": 500
+  },
+
+  "initialImport": {
+    "_comment_mode": "What to do when no state.json exists. 'all' posts every existing matching Workshop item, 'latest' posts only the newest number specified by limit, and 'none' records existing items without posting them.",
+    "mode": "all",
+
+    "_comment_limit": "Number of existing items to post when mode is 'latest'. Must be at least 1 for latest. Ignored for all and none.",
+    "limit": 0
+  }
+}
