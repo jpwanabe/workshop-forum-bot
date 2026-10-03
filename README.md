@@ -21,6 +21,9 @@ The bot periodically refreshes subscriber counts on existing posts.
 - Creator attribution with Steam profile links
 - Workshop preview images and descriptions
 - Subscriber count updates
+- Automatic cleanup of incompatible, banned, or removed Workshop items
+- Two-check protection before treating a missing Workshop item as removed
+- Manual posting of individual Workshop items by published file ID
 - Persistent local state to prevent duplicate posts
 - Restart-safe initial imports and catch-up
 - Cursor-based Steam Workshop pagination
@@ -161,6 +164,20 @@ Older items are recorded as baseline items and will not be posted later.
 
 Existing Workshop items are recorded as a baseline. Only items discovered afterward will be posted.
 
+### Workshop cleanup
+
+The optional `cleanup` settings control whether Discord Forum threads are automatically removed when the corresponding Steam Workshop item is no longer usable.
+
+Available settings:
+
+- `deleteIncompatibleItems` removes the Discord thread when Steam explicitly marks the Workshop item as incompatible.
+- `deleteBannedItems` removes the Discord thread when Steam explicitly marks the Workshop item as banned.
+- `deleteRemovedItems` removes the Discord thread when the Workshop item is no longer available from Steam.
+
+Removed Workshop items must be unavailable during two consecutive successful Steam detail checks before their Discord thread is deleted. A failed Steam API request does not count as a missing check.
+
+The Discord thread is deleted before the item is removed from `state.json`. If Discord deletion fails, the state entry is retained so the bot can try again during a later update.
+
 ## Running
 
 Run directly:
@@ -176,6 +193,10 @@ node bot.js
 ```
 
 The bot performs its own scheduled Workshop checks and subscriber updates. Cron is not required.
+
+To manually create and track a Forum post for a specific Steam Workshop item, run `node bot.js --post-item WORKSHOP_ID`.
+
+The item must belong to the configured Steam AppID and must not already exist in `state.json`. If Steam currently marks the item as incompatible or banned, the bot will display a warning but will still allow the manual post.
 
 To manually run one subscriber update and exit:
 
@@ -264,6 +285,8 @@ If a secret is accidentally published, revoke or rotate it ASAP rather than rely
 The bot intentionally does not aggressively retry failed Steam or Discord operations.
 
 Workshop checks run periodically, so an item missed during a temporary API failure can be discovered during a later successful check.
+
+A failed Steam detail request does not mark tracked Workshop items as missing and does not advance the removed-item cleanup counter.
 
 Subscriber counts are informational and will be refreshed during a later scheduled update if an update fails.
 
