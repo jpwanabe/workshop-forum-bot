@@ -225,6 +225,34 @@ function validateConfig(loaded) {
     );
   }
 
+  // Cleanup
+  if (
+    loaded.cleanup?.deleteIncompatibleItems !== undefined &&
+    typeof loaded.cleanup.deleteIncompatibleItems !== "boolean"
+  ) {
+    errors.push(
+      "cleanup.deleteIncompatibleItems must be true or false."
+    );
+  }
+
+  if (
+    loaded.cleanup?.deleteBannedItems !== undefined &&
+    typeof loaded.cleanup.deleteBannedItems !== "boolean"
+  ) {
+    errors.push(
+      "cleanup.deleteBannedItems must be true or false."
+    );
+  }
+
+  if (
+    loaded.cleanup?.deleteRemovedItems !== undefined &&
+    typeof loaded.cleanup.deleteRemovedItems !== "boolean"
+  ) {
+    errors.push(
+      "cleanup.deleteRemovedItems must be true or false."
+    );
+  }
+
   // Discord
   if (
     !Number.isInteger(Number(loaded.discord?.descriptionLimit)) ||
@@ -979,6 +1007,7 @@ async function updateSubscriberCounts() {
 
     await acquireStateWork("subscriber");
     lockAcquired = true;
+
     const state = await loadState();
 
     if (!state) {
@@ -1000,27 +1029,149 @@ async function updateSubscriberCounts() {
       return;
     }
 
+    /*
+     * A failed Steam request throws from getWorkshopDetails().
+     * Because cleanup only happens after this completes successfully,
+     * a Steam/network failure cannot be mistaken for removed items.
+     */
     const currentItems =
-	await getWorkshopDetails(trackedIds);
+      await getWorkshopDetails(trackedIds);
 
     const currentById = new Map(
       currentItems.map(item => [
-        item.publishedfileid,
+        String(item.publishedfileid),
         item
       ])
     );
 
     const changedItems = [];
+    const cleanupItems = [];
 
+    /*
+     * First classify every tracked item.
+     *
+     * Explicit Steam flags:
+     *   incompatible === true
+     *   banned === true
+     *
+     * Missing items are handled more cautiously. They must be absent
+     * from two consecutive successful GetDetails checks before they
+     * become eligible for deletion.
+     */
     for (const publishedFileId of trackedIds) {
+      const entry = state.items[publishedFileId];
       const item = currentById.get(publishedFileId);
 
-      if (!item) {
+      if (
+		  !item ||
+		  (
+			item.result !== undefined &&
+			Number(item.result) !== 1
+		  )
+		) {
+        const previousMissingChecks =
+          Number(entry.missingChecks ?? 0);
+
+        entry.missingChecks =
+          previousMissingChecks + 1;
+
+        await saveState(state);
+
+        if (entry.missingChecks < 2) {
+          log(
+            `Workshop item ${publishedFileId} is unavailable from Steam. ` +
+            `Missing check ${entry.missingChecks}/2; no deletion will occur yet.`
+          );
+          continue;
+        }
+
+        log(
+          `Workshop item ${publishedFileId} has been unavailable from Steam ` +
+          `for ${entry.missingChecks} consecutive successful check(s).`
+        );
+
+        if (config.cleanup?.deleteRemovedItems === true) {
+          cleanupItems.push({
+            publishedFileId,
+            item: null,
+            reason: "removed"
+          });
+        } else {
+          log(
+            `Removed-item cleanup is disabled; leaving Discord thread ` +
+            `for Workshop item ${publishedFileId} unchanged.`
+          );
+        }
+
+        continue;
+      }
+
+      /*
+       * The item exists again, so clear any previous missing streak.
+       */
+      if (Number(entry.missingChecks ?? 0) !== 0) {
+        entry.missingChecks = 0;
+        await saveState(state);
+
+        log(
+          `Workshop item ${publishedFileId} is available again; ` +
+          `cleared its missing-item counter.`
+        );
+      }
+
+      if (item.incompatible === true) {
+        log(
+          `Workshop item ${publishedFileId} "${item.title}" ` +
+          `is marked incompatible by Steam.`
+        );
+
+        if (config.cleanup?.deleteIncompatibleItems === true) {
+          cleanupItems.push({
+            publishedFileId,
+            item,
+            reason: "incompatible"
+          });
+        } else {
+          log(
+            `Incompatible-item cleanup is disabled; leaving its ` +
+            `Discord thread unchanged.`
+          );
+        }
+
+        /*
+         * Don't update the subscriber embed for an item that Steam
+         * explicitly considers incompatible.
+         */
+        continue;
+      }
+
+      if (item.banned === true) {
+        log(
+          `Workshop item ${publishedFileId} "${item.title}" ` +
+          `is marked banned by Steam.`
+        );
+
+        if (config.cleanup?.deleteBannedItems === true) {
+          cleanupItems.push({
+            publishedFileId,
+            item,
+            reason: "banned"
+          });
+        } else {
+          log(
+            `Banned-item cleanup is disabled; leaving its ` +
+            `Discord thread unchanged.`
+          );
+        }
+
+        /*
+         * Don't update the subscriber embed for a banned item.
+         */
         continue;
       }
 
       const previous =
-        Number(state.items[publishedFileId].subscribers ?? 0);
+        Number(entry.subscribers ?? 0);
 
       const current =
         Number(item.subscriptions ?? 0);
@@ -1030,63 +1181,70 @@ async function updateSubscriberCounts() {
       }
     }
 
-    if (!changedItems.length) {
-      log(
-        `Subscriber update complete. Checked ${trackedIds.length} tracked item(s); ` +
-        `0 changed; 0 updated; 0 failed.`
-      );
-      return;
-    }
+    /*
+     * Delete cleanup candidates before doing ordinary subscriber edits.
+     *
+     * State is removed only AFTER Discord confirms that the thread was
+     * deleted. If Discord deletion fails, the state mapping remains and
+     * the bot can retry during a later subscriber update.
+     */
+    let deleted = 0;
+    let cleanupFailed = 0;
 
-    const creators = await getCreators(
-      changedItems.map(item => item.creator)
-    );
+    for (let i = 0; i < cleanupItems.length; i++) {
+      const cleanup = cleanupItems[i];
+      const entry = state.items[cleanup.publishedFileId];
 
-    let updated = 0;
-    let failed = 0;
-
-    for (let i = 0; i < changedItems.length; i++) {
-      const item = changedItems[i];
-      const entry = state.items[item.publishedfileid];
+      /*
+       * A previous cleanup in this same run could theoretically have
+       * removed the entry already. Don't operate on a missing mapping.
+       */
+      if (!entry) {
+        continue;
+      }
 
       try {
         const thread =
           await forumChannel.threads.fetch(entry.threadId);
 
-        const message =
-          await thread.messages.fetch(entry.messageId);
+        const displayName =
+          cleanup.item?.title ??
+          `Workshop item ${cleanup.publishedFileId}`;
 
-        const creator = creators.get(item.creator);
+        log(
+          `Deleting Discord thread for "${displayName}" ` +
+          `because the Workshop item is ${cleanup.reason}.`
+        );
 
-        await message.edit({
-          embeds: [buildEmbed(item, creator)]
-        });
+        await thread.delete(
+          `Steam Workshop item ${cleanup.publishedFileId} is ${cleanup.reason}.`
+        );
 
-        const oldCount = entry.subscribers;
-        const newCount = Number(item.subscriptions ?? 0);
+        /*
+         * Discord deletion succeeded. It is now safe to forget the
+         * Discord mapping.
+         */
+        delete state.items[cleanup.publishedFileId];
 
-        entry.subscribers = newCount;
-
-        // Save immediately so a crash cannot lose successful updates.
         await saveState(state);
 
-        updated++;
+        deleted++;
 
         log(
-          `Updated subscribers for "${item.title}": ${oldCount} -> ${newCount}`
+          `Deleted Discord thread and removed Workshop item ` +
+          `${cleanup.publishedFileId} from state.`
         );
       } catch (error) {
-        failed++;
+        cleanupFailed++;
 
         log(
-          `Failed subscriber update for ${item.publishedfileid}: ` +
+          `Failed cleanup for Workshop item ${cleanup.publishedFileId}: ` +
           `${error.stack ?? error}`
         );
       }
 
-      // Pace Discord edits when more changed items remain.
       if (
-        i < changedItems.length - 1 &&
+        i < cleanupItems.length - 1 &&
         config.posting.subscriberUpdateDelayMs > 0
       ) {
         await sleep(
@@ -1095,9 +1253,92 @@ async function updateSubscriberCounts() {
       }
     }
 
+    /*
+     * Some items selected for ordinary subscriber updates may have been
+     * removed from state by cleanup above. Normally the two groups are
+     * mutually exclusive, but this check keeps the update path defensive.
+     */
+    const remainingChangedItems =
+      changedItems.filter(
+        item => state.items[String(item.publishedfileid)]
+      );
+
+    let updated = 0;
+    let updateFailed = 0;
+
+    if (remainingChangedItems.length) {
+      const creators = await getCreators(
+        remainingChangedItems.map(item => item.creator)
+      );
+
+      for (let i = 0; i < remainingChangedItems.length; i++) {
+        const item = remainingChangedItems[i];
+        const publishedFileId =
+          String(item.publishedfileid);
+
+        const entry =
+          state.items[publishedFileId];
+
+        try {
+          const thread =
+            await forumChannel.threads.fetch(entry.threadId);
+
+          const message =
+            await thread.messages.fetch(entry.messageId);
+
+          const creator =
+            creators.get(item.creator);
+
+          await message.edit({
+            embeds: [buildEmbed(item, creator)]
+          });
+
+          const oldCount = entry.subscribers;
+          const newCount =
+            Number(item.subscriptions ?? 0);
+
+          entry.subscribers = newCount;
+
+          /*
+           * Save immediately so a crash cannot lose a successful
+           * Discord update.
+           */
+          await saveState(state);
+
+          updated++;
+
+          log(
+            `Updated subscribers for "${item.title}": ` +
+            `${oldCount} -> ${newCount}`
+          );
+        } catch (error) {
+          updateFailed++;
+
+          log(
+            `Failed subscriber update for ${publishedFileId}: ` +
+            `${error.stack ?? error}`
+          );
+        }
+
+        if (
+          i < remainingChangedItems.length - 1 &&
+          config.posting.subscriberUpdateDelayMs > 0
+        ) {
+          await sleep(
+            config.posting.subscriberUpdateDelayMs
+          );
+        }
+      }
+    }
+
+    const failed =
+      cleanupFailed + updateFailed;
+
     log(
       `Subscriber update complete. Checked ${trackedIds.length} tracked item(s); ` +
-      `${changedItems.length} changed; ${updated} updated; ${failed} failed.`
+      `${changedItems.length} subscriber count(s) changed; ` +
+      `${updated} updated; ${cleanupItems.length} cleanup candidate(s); ` +
+      `${deleted} deleted; ${failed} failed.`
     );
   } finally {
     subscriberUpdateWaiting = false;
@@ -1129,6 +1370,151 @@ function scheduleLoop(name, intervalMs, task, setTimer) {
   }
 
   run();
+}
+
+async function runManualPostItem(publishedFileId) {
+  validateEnvironment();
+
+  config = await loadConfig();
+
+  const normalizedId = String(publishedFileId ?? "").trim();
+
+  if (!/^\d+$/.test(normalizedId)) {
+    throw new UserError(
+      "--post-item requires a numeric Steam Workshop published file ID."
+    );
+  }
+
+  const client = new Client({
+    intents: [GatewayIntentBits.Guilds]
+  });
+
+  activeClient = client;
+
+  client.once("clientReady", async () => {
+    try {
+      log(`Logged in to Discord as ${client.user.tag}`);
+
+      forumChannel =
+        await client.channels.fetch(FORUM_CHANNEL_ID);
+
+      if (
+        !forumChannel ||
+        forumChannel.type !== ChannelType.GuildForum
+      ) {
+        throw new Error(
+          "DISCORD_FORUM_CHANNEL_ID does not point to a Discord Forum channel."
+        );
+      }
+
+      let state = await loadState();
+
+      if (!state) {
+        state = createEmptyState();
+      }
+
+      if (state.items[normalizedId]) {
+        throw new UserError(
+          `Workshop item ${normalizedId} is already tracked in state.json.`
+        );
+      }
+
+      log(
+        `Fetching Workshop item ${normalizedId} for manual posting.`
+      );
+
+      const details =
+        await getWorkshopDetails([normalizedId]);
+
+      const item = details.find(
+        candidate =>
+          String(candidate.publishedfileid) === normalizedId
+      );
+
+      if (!item) {
+        throw new UserError(
+          `Steam did not return Workshop item ${normalizedId}.`
+        );
+      }
+
+      if (
+        item.result !== undefined &&
+        Number(item.result) !== 1
+      ) {
+        throw new UserError(
+          `Steam returned result ${item.result} for Workshop item ${normalizedId}.`
+        );
+      }
+
+      if (
+        String(item.consumer_appid ?? item.consumer_app_id ?? "") !==
+        String(config.steam.appId)
+      ) {
+        throw new UserError(
+          `Workshop item ${normalizedId} does not belong to configured ` +
+          `Steam AppID ${config.steam.appId}.`
+        );
+      }
+
+      if (item.incompatible === true) {
+        log(
+          `Warning: Workshop item ${normalizedId} is currently marked ` +
+          `incompatible by Steam. Manual posting will continue.`
+        );
+      }
+
+      if (item.banned === true) {
+        log(
+          `Warning: Workshop item ${normalizedId} is currently marked ` +
+          `banned by Steam. Manual posting will continue.`
+        );
+      }
+
+      const creators =
+        await getCreators(
+          item.creator ? [item.creator] : []
+        );
+
+      const creator =
+        creators.get(item.creator);
+
+      log(
+        `Manually posting Workshop item ${normalizedId}: ${item.title}`
+      );
+
+      const posted =
+        await createForumPost(item, creator);
+
+      state.items[normalizedId] = {
+        baseline: false,
+        threadId: posted.threadId,
+        messageId: posted.messageId,
+        subscribers: Number(item.subscriptions ?? 0)
+      };
+
+      /*
+       * Save immediately after Discord confirms creation so an ordinary
+       * restart cannot cause this manually posted item to be duplicated.
+       */
+      await saveState(state);
+
+      log(
+        `Posted "${item.title}" successfully and added ` +
+        `${normalizedId} to state.json.`
+      );
+
+      client.destroy();
+      activeClient = null;
+      process.exit(0);
+    } catch (error) {
+      logError("Manual Workshop post failed", error);
+      client.destroy();
+      activeClient = null;
+      process.exit(1);
+    }
+  });
+
+  await client.login(DISCORD_TOKEN);
 }
 
 async function runSubscriberUpdateTest() {
@@ -1277,7 +1663,18 @@ async function main() {
   await client.login(DISCORD_TOKEN);
 }
 
-if (process.argv.includes("--update-subscribers")) {
+const postItemIndex =
+  process.argv.indexOf("--post-item");
+
+if (postItemIndex !== -1) {
+  const publishedFileId =
+    process.argv[postItemIndex + 1];
+
+  runManualPostItem(publishedFileId).catch(error => {
+    logError("Fatal error", error);
+    process.exit(1);
+  });
+} else if (process.argv.includes("--update-subscribers")) {
   runSubscriberUpdateTest().catch(error => {
     logError("Fatal error", error);
     process.exit(1);

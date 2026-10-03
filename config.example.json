@@ -20,6 +20,17 @@
     }
   },
 
+  "cleanup": {
+    "_comment_deleteIncompatibleItems": "Delete the Discord Forum thread when Steam explicitly marks a tracked Workshop item as incompatible with the configured game.",
+    "deleteIncompatibleItems": true,
+
+    "_comment_deleteBannedItems": "Delete the Discord Forum thread when Steam explicitly marks a tracked Workshop item as banned.",
+    "deleteBannedItems": true,
+
+    "_comment_deleteRemovedItems": "Delete the Discord Forum thread after a tracked Workshop item is missing from two consecutive successful Steam detail checks.",
+    "deleteRemovedItems": true
+  },
+
   "discord": {
     "_comment_descriptionLimit": "Maximum number of characters from the Workshop description shown in Discord. Valid range: 1-4096.",
     "descriptionLimit": 500
